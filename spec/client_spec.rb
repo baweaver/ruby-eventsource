@@ -52,7 +52,7 @@ EOT
         requests << req
         send_stream_content(res, "", keep_open: true)
       end
-      
+
       headers = { "Authorization" => "secret" }
 
       with_client(subject.new(server.base_uri, headers: headers)) do |client|
@@ -78,7 +78,7 @@ EOT
         requests << req
         send_stream_content(res, "", keep_open: true)
       end
-      
+
       headers = { "Authorization" => "secret" }
 
       with_client(subject.new(server.base_uri, headers: headers, last_event_id: id)) do |client|
@@ -432,7 +432,7 @@ EOT
       server.setup_response("/") do |req,res|
         send_stream_content(res, "", keep_open: true)
       end
-      
+
       with_client(subject.new(server.base_uri)) do |client|
         expect(client.closed?).to be(false)
 

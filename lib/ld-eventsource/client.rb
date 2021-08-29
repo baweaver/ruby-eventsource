@@ -1,6 +1,5 @@
 require "ld-eventsource/impl/backoff"
-require "ld-eventsource/impl/event_parser"
-require "ld-eventsource/events"
+require "ld-eventsource/chunk_parser"
 require "ld-eventsource/errors"
 
 require "concurrent/atomics"
@@ -84,7 +83,7 @@ module SSE
     #   if you want to use something other than the default `TCPSocket`; it must implement
     #   `open(uri, timeout)` to return a connected `Socket`
     # @yieldparam [Client] client  the new client instance, before opening the connection
-    # 
+    #
     def initialize(uri,
           headers: {},
           connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -106,7 +105,7 @@ module SSE
       if socket_factory
         http_client_options["socket_class"] = socket_factory
       end
-      
+
       if proxy
         @proxy = proxy
       else
@@ -200,50 +199,11 @@ module SSE
     end
 
     private
-    
+
     def reset_http
       @http_client.close if !@http_client.nil?
       @cxn = nil
       @buffer = ""
-    end
-    
-    def read_lines
-      Enumerator.new do |gen|
-        loop do
-          line = read_line
-          break if line.nil?
-          gen.yield line
-        end
-      end
-    end
-    
-    def read_line
-      loop do
-        @lock.synchronize do
-          i = @buffer.index(/[\r\n]/)
-          if !i.nil? && !(i == @buffer.length - 1 && @buffer[i] == "\r")
-            i += 1 if (@buffer[i] == "\r" && @buffer[i + 1] == "\n")
-            return @buffer.slice!(0, i + 1).force_encoding(Encoding::UTF_8)
-          end
-        end
-        return nil if !read_chunk_into_buffer
-      end
-    end
-    
-    def read_chunk_into_buffer
-      # If @done is set, it means the Parser has signaled end of response body
-      @lock.synchronize { return false if @done }
-      begin
-        data = @cxn.readpartial
-      rescue HTTP::TimeoutError 
-        # We rethrow this as our own type so the caller doesn't have to know the httprb API
-        raise Errors::ReadTimeoutError.new(@read_timeout)
-      end
-      return false if data == nil
-      @buffer << data
-      # We are piping the content through the parser so that it can handle things like chunked
-      # encoding for us. The content ends up being appended to @buffer via our callback.
-      true
     end
 
     def default_logger
@@ -285,7 +245,7 @@ module SSE
         return if @stopped.value
         interval = @backoff.next_interval
         if interval > 0
-          @logger.info { "Will retry connection after #{'%.3f' % interval} seconds" } 
+          @logger.info { "Will retry connection after #{'%.3f' % interval} seconds" }
           sleep(interval)
         end
         cxn = nil
@@ -326,15 +286,15 @@ module SSE
       # it can automatically reset itself if enough time passes between failures.
       @backoff.mark_success
 
-      event_parser = Impl::EventParser.new(read_lines)
-      event_parser.items.each do |item|
-        return if @stopped.value
-        case item
-          when StreamEvent
-            dispatch_event(item)
-          when Impl::SetRetryInterval
-            @logger.debug { "Received 'retry:' directive, setting interval to #{item.milliseconds}ms" }
-            @backoff.base_interval = item.milliseconds.to_f / 1000
+      ChunkParser.new(cxn.body).each do |event|
+        break if @stopped.value
+
+        case event
+        when SetRetryInterval
+          @logger.debug { "Received 'retry:' directive, setting interval to #{event.milliseconds}ms" }
+          @backoff.base_interval = event.milliseconds.to_f / 1000
+        when StreamEvent
+          dispatch_event(event)
         end
       end
     end
@@ -351,7 +311,7 @@ module SSE
       @logger.warn { "#{message}: #{e.inspect}"}
       @logger.debug { "Exception trace: #{e.backtrace}" }
       begin
-        @on[:error].call(e)      
+        @on[:error].call(e)
       rescue StandardError => ee
         @logger.warn { "Error handler threw an exception: #{ee.inspect}"}
         @logger.debug { "Exception trace: #{ee.backtrace}" }

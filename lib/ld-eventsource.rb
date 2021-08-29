@@ -1,4 +1,5 @@
 require "ld-eventsource/client"
+require "ld-eventsource/chunk_parser"
 require "ld-eventsource/version"
 
 #
