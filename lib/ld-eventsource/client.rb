@@ -84,7 +84,7 @@ module SSE
     #   if you want to use something other than the default `TCPSocket`; it must implement
     #   `open(uri, timeout)` to return a connected `Socket`
     # @yieldparam [Client] client  the new client instance, before opening the connection
-    # 
+    #
     def initialize(uri,
           headers: {},
           connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -106,7 +106,7 @@ module SSE
       if socket_factory
         http_client_options["socket_class"] = socket_factory
       end
-      
+
       if proxy
         @proxy = proxy
       else
@@ -130,6 +130,7 @@ module SSE
         })
       @buffer = ""
       @lock = Mutex.new
+      @cursor_position = 0
 
       @backoff = Impl::Backoff.new(reconnect_time || DEFAULT_RECONNECT_TIME, MAX_RECONNECT_TIME,
         reconnect_reset_interval: reconnect_reset_interval)
@@ -200,13 +201,14 @@ module SSE
     end
 
     private
-    
+
     def reset_http
       @http_client.close if !@http_client.nil?
       @cxn = nil
       @buffer = ""
+      @cursor_position = 0
     end
-    
+
     def read_lines
       Enumerator.new do |gen|
         loop do
@@ -216,31 +218,44 @@ module SSE
         end
       end
     end
-    
+
     def read_line
       loop do
         @lock.synchronize do
-          i = @buffer.index(/[\r\n]/)
+          # Read offset from the last buffer position, instead of reading entire
+          # buffer while looking for line-break
+          i = @buffer.index(/[\r\n]/, @cursor_position)
+
           if !i.nil? && !(i == @buffer.length - 1 && @buffer[i] == "\r")
             i += 1 if (@buffer[i] == "\r" && @buffer[i + 1] == "\n")
+
+            # Make sure to reset the cursor, as we're about to slice it down.
+            @cursor_position = 0
+
             return @buffer.slice!(0, i + 1).force_encoding(Encoding::UTF_8)
           end
         end
         return nil if !read_chunk_into_buffer
       end
     end
-    
+
     def read_chunk_into_buffer
       # If @done is set, it means the Parser has signaled end of response body
       @lock.synchronize { return false if @done }
       begin
         data = @cxn.readpartial
-      rescue HTTP::TimeoutError 
+      rescue HTTP::TimeoutError
         # We rethrow this as our own type so the caller doesn't have to know the httprb API
         raise Errors::ReadTimeoutError.new(@read_timeout)
       end
       return false if data == nil
-      @buffer << data
+
+      @lock.synchronize do
+        # Find the end of the current buffer, then append the buffer.
+        @cursor_position = @buffer.size
+        @buffer << data
+      end
+
       # We are piping the content through the parser so that it can handle things like chunked
       # encoding for us. The content ends up being appended to @buffer via our callback.
       true
@@ -285,7 +300,7 @@ module SSE
         return if @stopped.value
         interval = @backoff.next_interval
         if interval > 0
-          @logger.info { "Will retry connection after #{'%.3f' % interval} seconds" } 
+          @logger.info { "Will retry connection after #{'%.3f' % interval} seconds" }
           sleep(interval)
         end
         cxn = nil
@@ -351,7 +366,7 @@ module SSE
       @logger.warn { "#{message}: #{e.inspect}"}
       @logger.debug { "Exception trace: #{e.backtrace}" }
       begin
-        @on[:error].call(e)      
+        @on[:error].call(e)
       rescue StandardError => ee
         @logger.warn { "Error handler threw an exception: #{ee.inspect}"}
         @logger.debug { "Exception trace: #{ee.backtrace}" }
